@@ -3,226 +3,299 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>QR Tool (iOS-friendly + Torch)</title>
+  <title>QR Scanner + Variant Generator</title>
 
-  <!-- Html5-Qrcode (HTTPS CDN) -->
+  <!-- Html5-Qrcode (camera scanning) -->
   <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.9/minified/html5-qrcode.min.js"></script>
+  <!-- QRCode generator (for creating QR images) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 
   <style>
     :root { color-scheme: light dark; }
-    body { font-family: system-ui, Arial, sans-serif; margin: 0; padding: 16px; }
-    h1 { font-size: 1.25rem; margin: 0 0 12px; }
-    .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin: 8px 0; }
-    select, button, input[type="file"] { padding:8px; border-radius:10px; border: 1px solid #9993; }
-    button { cursor:pointer; }
-    button:disabled { opacity:.5; cursor:not-allowed; }
-    #scanner { width: 100%; max-width: 420px; aspect-ratio: 1 / 1; background: #00000010; border-radius: 12px; overflow:hidden; }
-    #scanStatus { margin: 8px 0; min-height: 20px; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 16px; }
+    h1 { font-size: 1.2rem; margin: 0 0 10px; }
+    .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+    button, select, input, textarea { border: 1px solid #9993; border-radius: 10px; padding: 8px 10px; }
+    button { cursor: pointer; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    #scanner { width: 100%; max-width: 460px; aspect-ratio: 1 / 1; background: #00000010; border-radius: 12px; overflow: hidden; }
+    #scanStatus { min-height: 22px; margin: 6px 0; font-size: .95rem; opacity: .9; }
     .success { color: #128a12; }
     .danger { color: #c62828; }
-    .pill { font-size:.85rem; padding:.25rem .5rem; border-radius:999px; background:#9992; }
-    textarea { width: 100%; max-width: 420px; height: 72px; border-radius:10px; padding:10px; }
-    .hint { opacity:.7; font-size:.9rem; }
+    textarea { width: 100%; max-width: 460px; height: 80px; }
+    .section { margin-top: 16px; padding-top: 8px; border-top: 1px dashed #aaa4; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+    .card { border: 1px solid #9993; border-radius: 12px; padding: 10px; }
+    .qrbox { width: 100%; height: 160px; display: grid; place-items: center; }
+    .muted { opacity: .7; font-size: .9rem; }
+    .grow { flex: 1 1 auto; }
+    label.small { font-size: .85rem; opacity: .8; }
   </style>
 </head>
 <body>
-  <h1>QR Tool</h1>
+  <h1>QR Scanner + Variant Generator</h1>
 
+  <!-- Controls Row -->
   <div class="row">
-    <label for="cameraSelect" class="pill">Camera</label>
+    <label class="small" for="cameraSelect">Camera</label>
     <select id="cameraSelect"></select>
 
     <button id="btnStart">Start</button>
     <button id="btnStop" disabled>Stop</button>
 
-    <!-- Torch (appears only if supported) -->
-    <button id="btnTorch" hidden>🔦 Torch</button>
+    <button id="btnTorch" hidden>🔦 Torch: Off</button>
+
+    <div id="zoomWrap" class="row" hidden>
+      <label class="small" for="zoomRange">Zoom</label>
+      <input id="zoomRange" type="range" min="1" max="1" step="0.1" value="1" />
+      <span id="zoomVal" class="small muted">1×</span>
+    </div>
   </div>
 
+  <!-- Scanner View -->
   <div id="scanner"></div>
-
-  <div id="scanStatus" class="hint">Ready.</div>
+  <div id="scanStatus" class="muted">Ready.</div>
 
   <div class="row">
     <input id="fileInput" type="file" accept="image/*" />
-    <span class="hint">…or pick an image to scan</span>
+    <span class="muted">…or select an image to scan</span>
   </div>
 
-  <textarea id="scanResult" placeholder="Decoded text will appear here…" readonly></textarea>
+  <!-- Decoded Output -->
+  <div class="section">
+    <label class="small" for="scanResult">Decoded Text</label>
+    <textarea id="scanResult" placeholder="Decoded text will appear here…" readonly></textarea>
+  </div>
+
+  <!-- Variant Generator -->
+  <div class="section">
+    <div class="row">
+      <div class="grow">
+        <label class="small" for="baseText">Base Text (defaults to decoded text)</label>
+        <input id="baseText" type="text" placeholder="e.g. ABC12345" style="width:100%;" />
+      </div>
+      <button id="btnMakeVariants">Generate 10 Variants</button>
+    </div>
+    <div class="muted" style="margin-top:-4px">Will increment the <b>last letter or digit</b> by +1 repeatedly (wraps 9→0, Z→A, z→a). If no alphanumeric at the end, generation will fail.</div>
+
+    <div id="variants" class="grid" style="margin-top:12px;"></div>
+  </div>
 
   <script>
-    // --- helpers ---
-    const byId = (id) => document.getElementById(id);
-
+    // ========= Helpers =========
+    const $ = (id) => document.getElementById(id);
     let html5Qrcode = null;
     let currentCameraId = null;
     let torchOn = false;
+    let hasZoom = false;
 
     function isSecureOrigin(){
       return location.protocol === 'https:' || location.hostname === 'localhost';
     }
 
-    async function listCameras() {
-      const sel = byId('cameraSelect');
+    async function listCameras(){
+      const sel = $('cameraSelect');
       sel.innerHTML = '';
-      try {
+      try{
         const devices = await Html5Qrcode.getCameras();
-        if (!devices || !devices.length) {
-          sel.innerHTML = '<option value="">No cameras</option>';
-          return;
-        }
-        devices.forEach((d, i) => {
+        if(!devices?.length){ sel.innerHTML = '<option value="">No cameras</option>'; return; }
+        for(let i=0;i<devices.length;i++){
+          const d = devices[i];
           const opt = document.createElement('option');
-          opt.value = d.id;
-          opt.textContent = d.label || `Camera ${i + 1}`;
+          opt.value = d.id; opt.textContent = d.label || `Camera ${i+1}`;
           sel.appendChild(opt);
-        });
-        currentCameraId = devices[0].id;
-        sel.value = currentCameraId;
-      } catch (err) {
-        byId('scanStatus').innerHTML = `⚠️ Cameras not available: <span class="danger">${err}</span>`;
+        }
+        currentCameraId = devices[0].id; sel.value = currentCameraId;
+      }catch(err){
+        $('scanStatus').innerHTML = `⚠️ Cameras not available: <span class="danger">${err}</span>`;
       }
     }
 
-    function onScanSuccess(decodedText /*, decodedResult */) {
-      byId('scanResult').value = decodedText || '';
-      byId('scanStatus').innerHTML = '<span class="success">QR detected.</span>';
-      // optional: stop after first scan
-      // stopScanner();
+    function onScanSuccess(decodedText){
+      $('scanResult').value = decodedText || '';
+      if(!$('baseText').value) $('baseText').value = decodedText || '';
+      $('scanStatus').innerHTML = '<span class="success">QR detected.</span>';
     }
 
-    function onScanFail(/* error */) {
-      // called for each frame decode fail; keep quiet to avoid noise
-    }
+    function onScanFail(){ /* ignore frame decode errors to avoid noise */ }
 
-    async function startScanner() {
-      if (!isSecureOrigin()) {
-        byId('scanStatus').innerHTML = '⚠️ iOS requires HTTPS (or localhost) for camera.';
+    async function startScanner(){
+      if(!isSecureOrigin()){
+        $('scanStatus').innerHTML = '⚠️ iOS requires HTTPS (or localhost) for camera access.';
         return;
       }
+      if(!html5Qrcode) html5Qrcode = new Html5Qrcode('scanner');
 
-      const elId = 'scanner';
-      if (!html5Qrcode) html5Qrcode = new Html5Qrcode(elId);
+      $('btnStart').disabled = true; $('btnStop').disabled = false; $('scanStatus').textContent = 'Starting camera…';
+      $('btnTorch').hidden = true; torchOn = false; $('zoomWrap').hidden = true; hasZoom = false;
 
-      byId('btnStart').disabled = true;
-      byId('btnStop').disabled = false;
-      byId('scanStatus').textContent = 'Starting camera…';
-
-      const config = { fps: 10, qrbox: { width: 240, height: 240 }, aspectRatio: 1.0 };
-
-      // Hide torch UI until we know it’s supported.
-      byId('btnTorch').hidden = true;
-      torchOn = false;
-
-      try {
-        // iOS-friendly first: request the back camera without deviceId.
-        await html5Qrcode.start({ facingMode: "environment" }, config, onScanSuccess, onScanFail);
-
-        // After permission, deviceIds/labels are available on iOS; refresh list.
-        listCameras().catch(() => {});
-
-        byId('scanStatus').textContent = 'Camera running.';
-        await maybeEnableTorchButton(); // show torch button if supported
-      } catch (e1) {
-        // Fallback: try using the selected deviceId (good on desktop/Android).
-        try {
-          const camId = byId('cameraSelect').value || currentCameraId;
-          if (!camId) throw e1;
-          await html5Qrcode.start(camId, config, onScanSuccess, onScanFail);
-          byId('scanStatus').textContent = 'Camera running.';
-          await maybeEnableTorchButton();
-        } catch (e2) {
-          byId('scanStatus').innerHTML =
-            `⚠️ Camera start failed: <span class="danger">${e2.message || e2}</span>`;
-          byId('btnStart').disabled = false;
-          byId('btnStop').disabled = true;
+      const cfg = { fps: 10, qrbox: { width: 260, height: 260 }, aspectRatio: 1.0 };
+      try{
+        // iOS-friendly: start with facingMode first
+        await html5Qrcode.start({ facingMode: 'environment' }, cfg, onScanSuccess, onScanFail);
+        listCameras().catch(()=>{});
+        $('scanStatus').textContent = 'Camera running.';
+        await revealTrackFeaturesIfAny();
+      }catch(e1){
+        try{
+          const camId = $('cameraSelect').value || currentCameraId;
+          if(!camId) throw e1;
+          await html5Qrcode.start(camId, cfg, onScanSuccess, onScanFail);
+          $('scanStatus').textContent = 'Camera running.';
+          await revealTrackFeaturesIfAny();
+        }catch(e2){
+          $('scanStatus').innerHTML = `⚠️ Camera start failed: <span class="danger">${e2.message || e2}</span>`;
+          $('btnStart').disabled = false; $('btnStop').disabled = true;
         }
       }
     }
 
-    async function stopScanner() {
-      try {
-        if (html5Qrcode && html5Qrcode.isScanning) await html5Qrcode.stop();
-        byId('scanStatus').textContent = 'Stopped.';
-      } catch (e) {
-        byId('scanStatus').innerHTML = `⚠️ Stop error: <span class="danger">${e.message || e}</span>`;
-      } finally {
-        byId('btnStart').disabled = false;
-        byId('btnStop').disabled = true;
-        byId('btnTorch').hidden = true;
-        torchOn = false;
+    async function stopScanner(){
+      try{
+        if(html5Qrcode?.isScanning) await html5Qrcode.stop();
+        $('scanStatus').textContent = 'Stopped.';
+      }catch(e){
+        $('scanStatus').innerHTML = `⚠️ Stop error: <span class="danger">${e.message || e}</span>`;
+      }finally{
+        $('btnStart').disabled = false; $('btnStop').disabled = true;
+        $('btnTorch').hidden = true; torchOn = false; $('zoomWrap').hidden = true; hasZoom = false;
       }
     }
 
-    // --- Torch support (if the running track supports it) ---
-    async function maybeEnableTorchButton() {
-      try {
-        // Ask the scanner for the running track’s capabilities.
-        const caps = html5Qrcode.getRunningTrackCapabilities();
-        if (caps && 'torch' in caps) {
-          byId('btnTorch').hidden = false;
-          byId('btnTorch').textContent = '🔦 Torch: Off';
+    // ======= Torch & Zoom =======
+    async function revealTrackFeaturesIfAny(){
+      try{
+        const caps = html5Qrcode.getRunningTrackCapabilities?.();
+        if(!caps) return;
+        // Torch
+        if('torch' in caps){ $('btnTorch').hidden = false; $('btnTorch').textContent = '🔦 Torch: Off'; }
+        else { $('btnTorch').hidden = true; }
+        // Zoom
+        if('zoom' in caps){
+          let min = 1, max = 1, step = 0.1;
+          try{ min = caps.zoom.min ?? 1; max = caps.zoom.max ?? 1; step = caps.zoom.step ?? 0.1; }catch{}
+          if(max > min){
+            const r = $('zoomRange');
+            r.min = String(min); r.max = String(max); r.step = String(step); r.value = String(min);
+            $('zoomVal').textContent = `${Number(r.value).toFixed(1)}×`;
+            $('zoomWrap').hidden = false; hasZoom = true;
+          }
         } else {
-          byId('btnTorch').hidden = true;
+          $('zoomWrap').hidden = true; hasZoom = false;
         }
-      } catch {
-        byId('btnTorch').hidden = true;
-      }
+      }catch{}
     }
 
-    async function toggleTorch() {
-      if (!html5Qrcode || !html5Qrcode.isScanning) return;
-      try {
+    async function toggleTorch(){
+      if(!html5Qrcode?.isScanning) return;
+      try{
         torchOn = !torchOn;
-        // Apply the constraint to the running video track.
         await html5Qrcode.applyVideoConstraints({ advanced: [{ torch: torchOn }] });
-        byId('btnTorch').textContent = torchOn ? '🔦 Torch: On' : '🔦 Torch: Off';
-      } catch (e) {
-        byId('scanStatus').innerHTML =
-          `⚠️ Torch not available: <span class="danger">${e.message || e}</span>`;
-        byId('btnTorch').hidden = true;
-        torchOn = false;
+        $('btnTorch').textContent = torchOn ? '🔦 Torch: On' : '🔦 Torch: Off';
+      }catch(e){
+        $('scanStatus').innerHTML = `⚠️ Torch not available: <span class=\"danger\">${e.message || e}</span>`;
+        $('btnTorch').hidden = true; torchOn = false;
       }
     }
 
-    // --- File scan (avoid double instances) ---
-    async function scanFromFile(file) {
-      // stop live scan if active to avoid conflicts
-      try { if (html5Qrcode && html5Qrcode.isScanning) await html5Qrcode.stop(); } catch {}
-      byId('btnStart').disabled = false;
-      byId('btnStop').disabled = true;
-      byId('btnTorch').hidden = true;
-      torchOn = false;
+    async function setZoom(val){
+      if(!html5Qrcode?.isScanning || !hasZoom) return;
+      try{
+        await html5Qrcode.applyVideoConstraints({ advanced: [{ zoom: Number(val) }] });
+        $('zoomVal').textContent = `${Number(val).toFixed(1)}×`;
+      }catch(e){ $('scanStatus').innerHTML = `⚠️ Zoom failed: <span class=\"danger\">${e.message || e}</span>`; }
+    }
 
-      try {
+    // ======= File scan (avoid double instances) =======
+    async function scanFromFile(file){
+      try{ if(html5Qrcode?.isScanning) await html5Qrcode.stop(); }catch{}
+      $('btnStart').disabled = false; $('btnStop').disabled = true; $('btnTorch').hidden = true; $('zoomWrap').hidden = true;
+
+      try{
         const decoder = new Html5Qrcode('scanner');
-        try {
+        try{
           const result = await decoder.scanFileV2(file, true);
-          byId('scanResult').value = result.decodedText;
-          byId('scanStatus').innerHTML = '<span class="success">Image decoded.</span>';
-        } catch {
-          byId('scanStatus').innerHTML = '⚠️ No QR found in image.';
-        } finally {
-          try { await decoder.clear(); } catch {}
-        }
-      } catch (err) {
-        byId('scanStatus').innerHTML = `Error reading file: <span class="danger">${err}</span>`;
-      }
+          $('scanResult').value = result.decodedText || '';
+          if(!$('baseText').value) $('baseText').value = result.decodedText || '';
+          $('scanStatus').innerHTML = '<span class="success">Image decoded.</span>';
+        }catch{ $('scanStatus').innerHTML = '⚠️ No QR found in image.'; }
+        finally{ try{ await decoder.clear(); }catch{} }
+      }catch(err){ $('scanStatus').innerHTML = `Error reading file: <span class="danger">${err}</span>`; }
     }
 
-    // --- init ---
-    (function init(){
-      // Non-blocking camera list (on iOS, labels appear after permission)
-      listCameras().catch(()=>{});
+    // ======= Variant generation =======
+    function isAlphaNum(ch){ return /[0-9A-Za-z]/.test(ch); }
+    function incOne(ch){
+      if(ch >= '0' && ch <= '8') return String.fromCharCode(ch.charCodeAt(0)+1);
+      if(ch === '9') return '0';
+      if(ch >= 'A' && ch <= 'Y') return String.fromCharCode(ch.charCodeAt(0)+1);
+      if(ch === 'Z') return 'A';
+      if(ch >= 'a' && ch <= 'y') return String.fromCharCode(ch.charCodeAt(0)+1);
+      if(ch === 'z') return 'a';
+      return ch;
+    }
+    function incCharBy(ch, k){ let c = ch; for(let i=0;i<k;i++) c = incOne(c); return c; }
 
-      byId('cameraSelect').addEventListener('change', (e)=> currentCameraId = e.target.value);
-      byId('btnStart').addEventListener('click', startScanner);
-      byId('btnStop').addEventListener('click', stopScanner);
-      byId('btnTorch').addEventListener('click', toggleTorch);
-      byId('fileInput').addEventListener('change', (e)=>{
-        const f = e.target.files && e.target.files[0];
-        if (f) scanFromFile(f);
+    function makeVariants(){
+      const baseInput = $('baseText').value || $('scanResult').value || '';
+      if(!baseInput){ $('scanStatus').innerHTML = '⚠️ Nothing to generate. Provide base text.'; return; }
+      // find last alphanumeric character
+      let idx = -1;
+      for(let i = baseInput.length - 1; i >= 0; i--){ if(isAlphaNum(baseInput[i])){ idx = i; break; } }
+      if(idx === -1){ $('scanStatus').innerHTML = '⚠️ Base text must end with a letter or digit.'; return; }
+
+      const list = [];
+      for(let i=1;i<=10;i++){
+        const ch = baseInput[idx];
+        const inc = incCharBy(ch, i);
+        list.push(baseInput.slice(0, idx) + inc + baseInput.slice(idx+1));
+      }
+
+      renderVariants(list);
+    }
+
+    function renderVariants(arr){
+      const wrap = $('variants');
+      wrap.innerHTML = '';
+      arr.forEach((text, i)=>{
+        const card = document.createElement('div');
+        card.className = 'card';
+        const box = document.createElement('div'); box.className = 'qrbox';
+        const label = document.createElement('div'); label.className = 'muted'; label.textContent = text;
+        const actions = document.createElement('div'); actions.className = 'row';
+        const btn = document.createElement('button'); btn.textContent = 'Download PNG';
+
+        const qrDiv = document.createElement('div'); box.appendChild(qrDiv);
+        new QRCode(qrDiv, { text, width: 150, height: 150, correctLevel: QRCode.CorrectLevel.M });
+
+        btn.addEventListener('click', ()=>{
+          const canvas = qrDiv.querySelector('canvas');
+          if(!canvas) return;
+          const link = document.createElement('a');
+          link.download = `qr_variant_${i+1}.png`;
+          link.href = canvas.toDataURL('image/png');
+          link.click();
+        });
+
+        actions.appendChild(btn);
+        card.appendChild(box);
+        card.appendChild(label);
+        card.appendChild(actions);
+        wrap.appendChild(card);
       });
+    }
+
+    // ======= init =======
+    (function init(){
+      listCameras().catch(()=>{});
+      $('cameraSelect').addEventListener('change', (e)=> currentCameraId = e.target.value);
+      $('btnStart').addEventListener('click', startScanner);
+      $('btnStop').addEventListener('click', stopScanner);
+      $('btnTorch').addEventListener('click', toggleTorch);
+      $('zoomRange').addEventListener('input', (e)=> setZoom(e.target.value));
+      $('fileInput').addEventListener('change', (e)=>{ const f = e.target.files?.[0]; if(f) scanFromFile(f); });
+      $('btnMakeVariants').addEventListener('click', makeVariants);
     })();
   </script>
 </body>
